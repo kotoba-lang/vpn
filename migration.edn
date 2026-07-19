@@ -1,0 +1,4 @@
+{:schema "etzhayyim.migration/v1"
+ :source {:repository "etzhayyim/root" :revision "6fd297f38fe1b547e1d4c15ead9941c6ebaa3b31" :path "60-apps/etzhayyim-project-vpn" :tree "4232bc56ed6c0a825cd3754e5aee7164f3c3e33d" :tracked-files 16 :bytes 95606}
+ :destination {:repository "etzhayyim/com-etzhayyim-app-vpn"}
+ :identity {:allowed-additions ["README.edn" "migration.edn"]}}

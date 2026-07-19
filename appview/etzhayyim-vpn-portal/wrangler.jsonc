@@ -1,0 +1,23 @@
+{
+  "name": "etzhayyim-project-vpn",
+  "main": "src/app.ts",
+  "compatibility_date": "2025-03-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "routes": [
+    {
+      "pattern": "vpn.etzhayyim.com/*",
+      "zone_name": "etzhayyim.com"
+    }
+  ],
+  "vars": {
+    "VPN_VERSION": "0.1.0-beta",
+    "VPN_ACTOR_DID": "did:web:vpn.etzhayyim.com"
+  },
+  "observability": {
+    "enabled": true
+  }
+  // secrets (wrangler secret put):
+  //   VPN_PROVISIONER_URL  — http://<provisioner-lb-ip>:8080
+  //   PROVISIONER_SECRET   — shared secret for x-internal-trust header
+  //   AUTHN_SERVICE_URL    — https://auth.etzhayyim.com (or service binding)
+}

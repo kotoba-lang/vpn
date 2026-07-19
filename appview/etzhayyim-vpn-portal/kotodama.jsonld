@@ -1,0 +1,59 @@
+{
+  "@context": "https://etzhayyim.com/ns/kotodama/v1",
+  "@id": "did:web:vpn.etzhayyim.com",
+  "accent": "#0f172a",
+  "name": "vpn",
+  "nanoid": "vpn0gf101",
+  "performerType": "service",
+  "runtimeType": "worker",
+  "uiType": "api",
+  "profile": {
+    "displayName": "etzhayyim VPN",
+    "description": "No-logs WireGuard VPN — etzhayyim.com suite passkey auth",
+    "isBot": true,
+    "agentType": "autonomous",
+    "operator": "etzhayyim.com",
+    "protocols": ["xrpc", "mcp"],
+    "capabilities": [
+      "vpn_provision_device",
+      "vpn_revoke_device",
+      "vpn_list_devices",
+      "vpn_get_server_list",
+      "vpn_rotate_key",
+      "vpn_download_config",
+      "vpn_get_subscription"
+    ]
+  },
+  "routes": [
+    {
+      "host": "vpn.etzhayyim.com",
+      "paths": ["/"],
+      "tls": true
+    }
+  ],
+  "governance": {
+    "classification": "internal",
+    "complianceFrameworks": ["telecom-jigyou-todokede"],
+    "raci": "responsible"
+  },
+  "space": {
+    "name": "etzhayyim VPN",
+    "description": "No-logs WireGuard VPN operations",
+    "joinRule": "invite",
+    "historyVisibility": "shared",
+    "channels": [
+      {
+        "name": "vpn-ops",
+        "kind": "internal",
+        "default": true,
+        "description": "VPN provisioning events"
+      }
+    ]
+  },
+  "triggers": {
+    "http": {
+      "listen": "0.0.0.0:8080",
+      "spa": false
+    }
+  }
+}
