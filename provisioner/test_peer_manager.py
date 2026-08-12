@@ -152,12 +152,26 @@ class TestExplicitEndpointStillWorks(PeerPushTestCase):
         asyncio.run(peer_manager.add_peer(FAKE_PUBKEY, "10.8.0.42/32"))
         self.assertEqual("http://10.9.0.5:8081/peers", str(self.requests[0].url))
 
-    def test_secret_omitted_when_unset(self):
-        # Pre-existing behaviour, pinned so a later change to it is deliberate:
-        # a blank secret sends no auth header at all.
+    def test_unset_secret_raises_and_sends_nothing(self):
+        # Supersedes test_secret_omitted_when_unset, which pinned the old
+        # behaviour on purpose: a blank secret used to send no auth header and
+        # push the peer anyway. That is the client half of a fail-open, so the
+        # pin is now inverted -- no credential, no request.
         self.set_env("http://10.9.0.5:8081", secret="")
-        asyncio.run(peer_manager.add_peer(FAKE_PUBKEY, "10.8.0.42/32"))
-        self.assertIsNone(self.requests[0].headers.get("x-internal-trust"))
+        with self.assertRaises(RuntimeError) as ctx:
+            asyncio.run(peer_manager.add_peer(FAKE_PUBKEY, "10.8.0.42/32"))
+        self.assertIn("WG_AGENT_SECRET", str(ctx.exception))
+        self.assertEqual(
+            [], self.requests, "a peer push was built without a credential"
+        )
+
+    def test_whitespace_secret_raises_and_sends_nothing(self):
+        # Whitespace is a configuration accident, not a credential -- the same
+        # reading _agent_base() already applies to a blank WG_AGENT_URL.
+        self.set_env("http://10.9.0.5:8081", secret="   ")
+        with self.assertRaises(RuntimeError):
+            asyncio.run(peer_manager.remove_peer(FAKE_PUBKEY))
+        self.assertEqual([], self.requests)
 
 
 if __name__ == "__main__":
