@@ -215,15 +215,108 @@ async def revoke_device(request: Request, body: RevokeDeviceInput):
     check_internal_trust(request)
     did = get_caller_did(request, body.model_dump())
 
-    deleted = await db.delete_device(did, body.deviceId)
-    if deleted is None:
+    # Ownership is decided before anything is mutated, as it was before -- only
+    # now by a read rather than by the delete's own RETURNING. Nothing else
+    # about this branch changes: a device this caller does not have is still a
+    # 404 that touches neither side.
+    device = await db.get_device(did, body.deviceId)
+    if device is None:
         raise HTTPException(status_code=404, detail="DeviceNotFound")
 
+    # ── Unbind the peer before deleting the record that names it ─────────────
+    #
+    # This used to delete first and swallow the unbind, and the two together
+    # were worse than either. db.delete_device is a hard `DELETE ... RETURNING`
+    # with no tombstone, and the row is the only handle this service has on a
+    # peer: list_devices reads it, count_devices enforces the device limit from
+    # it, allocate_ip derives the address pool from it (db.get_assigned_ips),
+    # and this function finds the key to remove by it. So a failed unbind after
+    # a completed delete left a bound tunnel that nothing could name -- and the
+    # `# non-fatal` catch reported exactly that outcome as {"ok": True}. A
+    # revocation that says it succeeded while the tunnel is still up, on a
+    # no-logs VPN.
+    #
+    # Destroy is the third of this file's three orders, and it is the reverse of
+    # provisionDevice's for the same reason rather than in spite of it. Create
+    # writes the record first because the peer is what routes and the record is
+    # what finds it again; destroy stops the routing first because the record
+    # that finds it is about to go away. One rule underneath both: the record
+    # never stops naming a resource that exists, and no resource exists that the
+    # record never named.
+    #
+    # Reordering is the whole fix, and it is safe because the unbind is
+    # idempotent -- so the failed-then-retried path does not need a second
+    # mechanism. Traced rather than assumed: `wg set <iface> peer <key> remove`
+    # parses to WGPEER_REMOVE_ME (wireguard-tools config.c), which reaches the
+    # kernel as WGPEER_F_REMOVE_ME, and set_peer() sets ret = 0 *before* looking
+    # the peer up, so an absent peer takes `if (!peer) ... goto out` and returns
+    # success (drivers/net/wireguard/netlink.c). `wg` exits non-zero only when
+    # the ipc call fails, so run_wg's check=True does not fire, and wg-agent's
+    # DELETE /peers answers {"ok": True} without consulting the peer list at
+    # all. Ubuntu 22.04's in-tree WireGuard is what install.sh puts on the exit
+    # node, so that is the path being described.
+    #
+    # A failure here is now the caller's answer instead of a log line. Nothing
+    # has been mutated, so there is nothing to roll back: the row is intact and
+    # the device still works. It is left to propagate rather than dressed up,
+    # for the reason peer_manager.PeerRejected gives -- a 403 means our
+    # credential was refused and a 5xx means the exit node is unwell, and
+    # neither is anything the caller did.
     try:
-        await peer_manager.remove_peer(deleted["public_key"])
-    except Exception as e:
-        # device already removed from DB — log but don't fail
-        print(f"[vpn-provisioner] wg-agent remove_peer failed (non-fatal): {e}")
+        await peer_manager.remove_peer(device["public_key"])
+    except peer_manager.PeerRejected:
+        # The one refusal that is evidence rather than an obstacle. wg-agent
+        # applies the same require_public_key() to a remove as to an add, so a
+        # key it will not accept here is a key it never bound; there is no peer
+        # to unbind and the precondition for the delete already holds. Refusing
+        # would instead make such a row permanently undeletable -- and the row
+        # it describes is one provisionDevice tried and failed to withdraw,
+        # which is the residue that path deliberately leaves *because* this one
+        # can clear it.
+        print(
+            "[vpn-provisioner] revokeDevice: the exit node refused the stored "
+            f"key for device {body.deviceId} as malformed, so it can never have "
+            "been bound; removing the record"
+        )
+
+    # ── Delete the record last ───────────────────────────────────────────────
+    #
+    # If this fails the peer is gone and the row remains: a record naming a peer
+    # that no longer exists. That is the direction this order chooses on
+    # purpose. It over-counts rather than under-counts -- the device shows in
+    # listDevices, holds its own address in the pool and still counts against
+    # the limit -- it routes nothing, and repeating the request finishes it,
+    # because the unbind it repeats is a no-op. The other order's residue was a
+    # peer with no row: invisible, uncounted, still carrying traffic, and with
+    # no handle left to withdraw it by.
+    #
+    # So the answer understates rather than overstates. The tunnel is already
+    # down by this point, which is the half that matters on a VPN; what is
+    # reported as failed is the bookkeeping, and it is what the retry completes.
+    try:
+        deleted = await db.delete_device(did, body.deviceId)
+    except Exception as delete_error:
+        print(
+            "[vpn-provisioner] revokeDevice: the peer was unbound but the "
+            f"record could not be deleted ({delete_error}); device "
+            f"{body.deviceId} routes nothing and remains listed until the "
+            "request is retried"
+        )
+        raise HTTPException(
+            status_code=503, detail="RevokeDeviceFailed"
+        ) from delete_error
+
+    if deleted is None:
+        # get_device found the row and the delete did not match it. The peer is
+        # unbound either way, so the state the caller asked for is the state
+        # they have; this is a concurrent revoke of the same device, not a
+        # device they do not own -- that was already answered above, before
+        # anything was touched.
+        print(
+            "[vpn-provisioner] revokeDevice: the record for device "
+            f"{body.deviceId} was already gone when the delete ran; the peer is "
+            "unbound"
+        )
 
     return {"ok": True, "deviceId": body.deviceId}
 
