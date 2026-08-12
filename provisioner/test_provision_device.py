@@ -132,6 +132,9 @@ class ProvisionDeviceTestCase(unittest.TestCase):
         self.patch_db("get_assigned_ips", self._get_assigned_ips)
         self.patch_db("insert_device", self._insert_device)
         self.patch_db("delete_device", self._delete_device)
+        # revokeDevice looks the device up before it unbinds anything, so the
+        # recovery test below needs the read as well as the delete.
+        self.patch_db("get_device", self._get_device)
 
     # ── environment / doubles ────────────────────────────────────────────────
 
@@ -232,6 +235,12 @@ class ProvisionDeviceTestCase(unittest.TestCase):
             "public_key": public_key, "assigned_ip": assigned_ip,
             "server_id": server_id,
         }
+
+    async def _get_device(self, did, device_id):
+        row = self.rows.get(device_id)
+        if row is None or row["did"] != did:
+            return None
+        return dict(row)
 
     async def _delete_device(self, did, device_id):
         if self.delete_fails:
