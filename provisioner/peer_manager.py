@@ -44,11 +44,22 @@ def _agent_base() -> str:
 
 
 def _headers() -> dict:
-    h = {"content-type": "application/json"}
-    secret = os.environ.get("WG_AGENT_SECRET", "")
-    if secret:
-        h["x-internal-trust"] = secret
-    return h
+    """Build the peer-push headers, or refuse to build them.
+
+    The client half of the same rule the wg-agent enforces on its side: sending
+    the request without the credential is not a degraded mode, it is an
+    unauthenticated peer mutation. Omitting the header used to be silent, which
+    meant a blank secret at both ends produced a working system with no
+    authentication anywhere in it -- the failure was invisible precisely
+    because it was symmetrical.
+    """
+    secret = os.environ.get("WG_AGENT_SECRET", "").strip()
+    if not secret:
+        raise RuntimeError(
+            "WG_AGENT_SECRET is not set. The peer push authenticates to the "
+            "exit node with it; there is no unauthenticated mode."
+        )
+    return {"content-type": "application/json", "x-internal-trust": secret}
 
 
 async def add_peer(public_key: str, assigned_ip: str):

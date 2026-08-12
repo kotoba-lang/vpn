@@ -3,22 +3,63 @@
 # Exposes HTTP API for provisioner to add/remove WireGuard peers
 # No connection logs written — no-logs invariant (ADR-2605252200 §5)
 
+import hmac
 import os
 import subprocess
 import urllib.parse
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
 import uvicorn
 
 LISTEN_PORT  = int(os.environ.get("WG_AGENT_PORT", "8081"))
 WG_IFACE     = os.environ.get("WG_IFACE", "wg0")
-AGENT_SECRET = os.environ.get("WG_AGENT_SECRET", "")
 
-app = FastAPI()
+
+def _secret() -> str:
+    """The shared secret proving a request came from the provisioner."""
+    return os.environ.get("WG_AGENT_SECRET", "").strip()
+
+
+def require_secret() -> str:
+    """Return the shared secret, or refuse to name one.
+
+    /peers reconfigures the WireGuard interface through `wg` as root. This
+    secret is the only thing standing between that and any caller who can open
+    a socket to this port, so there is no default and no unauthenticated mode.
+    install.sh already refuses to install without it (`${WG_AGENT_SECRET:?}`);
+    this makes the running service hold to the same contract.
+    """
+    secret = _secret()
+    if not secret:
+        raise RuntimeError(
+            "WG_AGENT_SECRET is not set. It is the only credential protecting "
+            "peer administration on this exit node, which runs `wg` as root."
+        )
+    return secret
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Refuse to serve rather than serve unauthenticated. systemd's
+    # Restart=on-failure will retry and journalctl will carry the reason.
+    require_secret()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 def check_auth(request: Request):
-    if AGENT_SECRET and request.headers.get("x-internal-trust") != AGENT_SECRET:
+    secret = _secret()
+    if not secret:
+        # Reachable only if the app is served without its lifespan.
+        raise HTTPException(
+            status_code=503,
+            detail="ServiceMisconfigured: WG_AGENT_SECRET is not set",
+        )
+    presented = request.headers.get("x-internal-trust") or ""
+    if not hmac.compare_digest(presented, secret):
         raise HTTPException(status_code=403, detail="Forbidden")
 
 

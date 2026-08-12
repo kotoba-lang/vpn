@@ -2,6 +2,7 @@
 # Handles all 7 XRPC vpn endpoints proxied from CF Worker
 # ADR-2605252200 — no session logs, no connection timestamps
 
+import hmac
 import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Response
@@ -13,12 +14,52 @@ import db
 import peer_manager
 import config_generator
 
-PROVISIONER_SECRET = os.environ.get("PROVISIONER_SECRET", "")
 NSID = "ai.etzhayyim.apps.vpn"
 
 
+def _secret() -> str:
+    """The shared secret proving a request came from the vpn portal Worker.
+
+    Read per call rather than captured at import so that the startup check and
+    the request check cannot disagree about what is configured.
+    """
+    return os.environ.get("PROVISIONER_SECRET", "").strip()
+
+
+def require_secret() -> str:
+    """Return the shared secret, or refuse to name one.
+
+    There is no safe way to serve these routes without it. The DID that
+    authorises every operation below arrives in a caller-supplied header, put
+    there by the portal Worker after it has verified a session; this secret is
+    the only thing establishing that the caller *is* that Worker. Absent it,
+    `x-caller-did` is an unverified claim and anyone who can reach the pod may
+    assert any user's identity.
+    """
+    secret = _secret()
+    if not secret:
+        raise RuntimeError(
+            "PROVISIONER_SECRET is not set. It is the only credential "
+            "separating the portal Worker from any other caller that can reach "
+            "this service, so there is no default and no unauthenticated mode."
+        )
+    return secret
+
+
 def check_internal_trust(request: Request):
-    if PROVISIONER_SECRET and request.headers.get("x-internal-trust") != PROVISIONER_SECRET:
+    secret = _secret()
+    if not secret:
+        # Reachable only if the app is served without its lifespan (the startup
+        # check below would otherwise have stopped the process). Refuse rather
+        # than admit the request, and name the variable so it is diagnosable.
+        raise HTTPException(
+            status_code=503,
+            detail="ServiceMisconfigured: PROVISIONER_SECRET is not set",
+        )
+    presented = request.headers.get("x-internal-trust") or ""
+    # compare_digest: the comparison is against a shared secret, so it should
+    # not leak its prefix through timing.
+    if not hmac.compare_digest(presented, secret):
         raise HTTPException(status_code=403, detail="Forbidden")
 
 
@@ -31,6 +72,13 @@ def get_caller_did(request: Request, body: dict | None = None) -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Fail closed, and fail at the moment the operator changed something rather
+    # than at the first request an attacker makes. The deployment already
+    # declares this secret mandatory -- deployment.yaml pulls it from a
+    # secretKeyRef with no `optional: true`, so a missing Secret already stops
+    # the container. This closes the remaining case: a Secret that exists with
+    # an empty value, which the kubelet is happy to inject.
+    require_secret()
     yield
 
 
