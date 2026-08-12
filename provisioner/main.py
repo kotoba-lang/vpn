@@ -140,8 +140,59 @@ async def provision_device(request: Request, body: ProvisionDeviceInput):
     assigned_ip = await peer_manager.allocate_ip(body.serverId)
     device_id = nanoid.generate(size=12)
 
-    await peer_manager.add_peer(body.publicKey, assigned_ip)
+    # ── Write the record before binding the peer it names ────────────────────
+    #
+    # This used to bind first. A failed insert then left a peer on the exit
+    # node with no row anywhere naming it: not in listDevices, not counted by
+    # count_devices against the caller's device limit, and not reachable by
+    # revokeDevice, which finds the key to remove by looking the device up. A
+    # tunnel that works and that nothing can see or withdraw, on a no-logs VPN.
+    #
+    # It is not the reverse of rotateKey's fix, though it is the same rule.
+    # There, binding first was safe because an allowed-ip belongs to exactly
+    # one peer, so the add MOVED the address off the old key and the record
+    # kept naming something real throughout. There is no old peer here, so
+    # binding first creates a peer that no record has ever named -- the state
+    # rotateKey's ordering exists to avoid.
+    #
+    # The rule both follow: never create the thing that routes traffic before
+    # the record that can find it again. The record is the only handle the rest
+    # of this service has.
+    #
+    # "Reserve the address first" is the same act as this one, not a third
+    # option: the pool is derived from the device table (peer_manager
+    # .allocate_ip reads db.get_assigned_ips), so the row IS the reservation. A
+    # separate reservation table would add a second row that can be orphaned
+    # and would need a migration on a database this module already works around
+    # elsewhere; it would move the leak rather than close it.
     await db.insert_device(did, device_id, body.deviceName, body.publicKey, assigned_ip, body.serverId)
+
+    # ── Withdraw the record if the peer cannot be bound ──────────────────────
+    #
+    # A device recorded but not bound is a device that does not work, so it
+    # should not be reported as provisioned. Delete it and let the failure
+    # reach the caller -- a PeerRejected keeps its 422 through the handler
+    # above, and anything else stays a fault on this side, as in rotateKey.
+    #
+    # If the withdrawal ALSO fails, what is left is a row with no peer, and
+    # that is the harmless direction of the same disagreement: it routes
+    # nothing, it appears in listDevices, it holds its own address in the pool,
+    # and the caller can revokeDevice it -- that path already tolerates a peer
+    # that is not there. The other order's residue is a peer with no row, which
+    # routes traffic and has no such handle. Both orders can leave something
+    # behind; only one leaves something the service can name.
+    try:
+        await peer_manager.add_peer(body.publicKey, assigned_ip)
+    except Exception:
+        try:
+            await db.delete_device(did, device_id)
+        except Exception as withdraw_error:
+            print(
+                "[vpn-provisioner] provisionDevice: the peer was not bound and "
+                f"the record could not be withdrawn ({withdraw_error}); device "
+                f"{device_id} exists but routes nothing and should be revoked"
+            )
+        raise
 
     return {
         "deviceId": device_id,
@@ -272,6 +323,10 @@ async def rotate_key(request: Request, body: RotateKeyInput):
     # names. The old peer has not been removed yet, so this restores a working
     # device rather than merely a consistent row.
     try:
+        # The bool this returns is deliberately not enforced -- see
+        # db.update_device_key for what it is actually derived from and what
+        # would have to be observed before a check on it could be trusted. A
+        # raised exception is unambiguous, and that is what is acted on here.
         await db.update_device_key(did, body.deviceId, body.newPublicKey)
     except Exception as update_error:
         try:
