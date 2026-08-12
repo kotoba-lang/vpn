@@ -13,6 +13,7 @@
 #       needs only fastapi/uvicorn/pydantic, as install.sh installs).
 
 import asyncio
+import base64
 import os
 import unittest
 
@@ -22,7 +23,12 @@ import main
 
 FAKE_SECRET = "FAKE-SECRET-FOR-TEST-NOT-REAL"
 WRONG_SECRET = "FAKE-WRONG-SECRET-FOR-TEST"
-FAKE_PUBKEY = "FAKE-WG-PUBKEY-FOR-TEST="
+# Obviously synthetic, but shaped like a real key: 32 bytes of ASCII in
+# standard base64, which is 44 characters ending in '='. Spelled as an
+# encode() call so the plaintext stays visible in the source. It has to be
+# well-formed because the /peers routes now check the form before running
+# `wg` -- see test_peer_argv.py.
+FAKE_PUBKEY = base64.b64encode(b"FAKE-TEST-KEY-NOT-A-REAL-WG-KEY!").decode()
 
 # Requests that reconfigure the interface, plus the read that enumerates it.
 PROTECTED = [
