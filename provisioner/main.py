@@ -85,6 +85,21 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+@app.exception_handler(peer_manager.PeerRejected)
+async def peer_rejected_handler(request: Request, exc: peer_manager.PeerRejected):
+    """Answer a refused peer argument as the caller's error, which it is.
+
+    The exit node is where peer arguments become argv for a root `wg`, so that
+    is where they are checked; see peer_manager.PeerRejected for why the check
+    is not also restated here. Without this handler its 422 arrives as an
+    httpx.HTTPStatusError and leaves as a 500, telling the caller the service
+    broke when in fact it declined.
+    """
+    return JSONResponse(
+        {"error": "InvalidPeerArgument", "message": exc.detail}, status_code=422
+    )
+
+
 @app.get("/health")
 async def health():
     return {"ok": True, "app": "vpn-provisioner"}
@@ -230,10 +245,63 @@ async def rotate_key(request: Request, body: RotateKeyInput):
     if await db.public_key_exists(body.newPublicKey):
         return JSONResponse({"error": "DuplicatePublicKey"}, status_code=400)
 
-    # atomic key swap on exit node
-    await peer_manager.remove_peer(device["public_key"])
-    await peer_manager.add_peer(body.newPublicKey, device["assigned_ip"])
-    await db.update_device_key(did, body.deviceId, body.newPublicKey)
+    old_public_key = device["public_key"]
+    assigned_ip = device["assigned_ip"]
+
+    # ── Bind the new key before unbinding the old one ────────────────────────
+    #
+    # This used to remove first. Every way the rest of the rotation could fail
+    # -- a key the exit node refuses, an unreachable exit node, a database that
+    # will not take the update -- then left the caller with no peer at all and a
+    # record still naming the key that had just been deleted. The device was
+    # gone and the two sides disagreed about why.
+    #
+    # Adding first inverts that. An allowed-ip belongs to exactly one peer, so
+    # binding the tunnel address to the new key moves it off the old one; if
+    # this call fails, nothing has moved and the caller's existing device keeps
+    # working. The rotation fails; the tunnel does not.
+    #
+    # A malformed key is refused here, by the service that will run `wg`, and
+    # comes back as a 422 with nothing mutated -- which is what validating at
+    # this boundary was meant to achieve, without a second copy of the rule.
+    await peer_manager.add_peer(body.newPublicKey, assigned_ip)
+
+    # ── Make the record agree before removing the fallback ───────────────────
+    #
+    # If the record cannot be updated, put the tunnel address back on the key it
+    # names. The old peer has not been removed yet, so this restores a working
+    # device rather than merely a consistent row.
+    try:
+        await db.update_device_key(did, body.deviceId, body.newPublicKey)
+    except Exception as update_error:
+        try:
+            await peer_manager.add_peer(old_public_key, assigned_ip)
+        except Exception as restore_error:
+            # Both the record and the restore failed: the address is on a key
+            # the database does not know. Say so plainly -- this is the one
+            # outcome an operator has to act on.
+            print(
+                "[vpn-provisioner] rotateKey: could not update the record and "
+                f"could not restore the previous peer ({restore_error}); the "
+                f"tunnel address for device {body.deviceId} is bound to a key "
+                "that is not in the database"
+            )
+            raise HTTPException(
+                status_code=500, detail="RotateKeyInconsistent"
+            ) from restore_error
+        print(f"[vpn-provisioner] rotateKey: record not updated, rolled back ({update_error})")
+        raise HTTPException(status_code=503, detail="RotateKeyFailed") from update_error
+
+    # ── Retire the old peer ──────────────────────────────────────────────────
+    #
+    # Last, because it is the only step whose failure is harmless: the address
+    # already moved, so a peer left behind here holds no allowed-ips and can
+    # route nothing. Same reasoning as revokeDevice -- do not fail a completed
+    # rotation over cleanup.
+    try:
+        await peer_manager.remove_peer(old_public_key)
+    except Exception as e:
+        print(f"[vpn-provisioner] rotateKey: stale peer left on exit node (non-fatal): {e}")
 
     return {"ok": True, "deviceId": body.deviceId}
 

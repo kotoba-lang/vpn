@@ -62,6 +62,43 @@ def _headers() -> dict:
     return {"content-type": "application/json", "x-internal-trust": secret}
 
 
+class PeerRejected(Exception):
+    """The exit node refused the arguments, not the request.
+
+    wg-agent holds peer arguments to their exact form before they reach a `wg`
+    it runs as root -- 32 bytes of standard base64 for a key, a single host
+    address for allowed-ips (wg-agent/main.py). That rule belongs there, because
+    that is where argv is, and it cannot be imported from here: install.sh puts
+    exactly one file on the exit node (`cp main.py` into /opt/vpn-wg-agent) and
+    the provisioner image is built from provisioner/ alone (`COPY . .`, then
+    `uvicorn main:app` from that directory). The two deployables share no module
+    and no build.
+
+    Restating the rule here would give one security decision two homes and no
+    way to keep them agreeing. Forwarding the exit node's answer keeps it in
+    one home: a 422 from wg-agent is the caller's error and should reach the
+    caller as one, instead of being flattened into a 500 by raise_for_status().
+
+    Only 422 is forwarded. A 403 means *our* credential was refused and a 5xx
+    means the exit node is unwell; neither is anything the caller did, so both
+    stay faults on this side.
+    """
+
+    def __init__(self, detail: str):
+        super().__init__(detail)
+        self.detail = detail
+
+
+def _raise_for_peer_response(resp: httpx.Response):
+    if resp.status_code == 422:
+        try:
+            detail = resp.json().get("detail")
+        except Exception:
+            detail = None
+        raise PeerRejected(detail if isinstance(detail, str) else "InvalidPeerArgument")
+    resp.raise_for_status()
+
+
 async def add_peer(public_key: str, assigned_ip: str):
     """Register a new WireGuard peer on the exit node."""
     resp = await _client.post(
@@ -69,7 +106,7 @@ async def add_peer(public_key: str, assigned_ip: str):
         json={"public_key": public_key, "allowed_ip": assigned_ip},
         headers=_headers(),
     )
-    resp.raise_for_status()
+    _raise_for_peer_response(resp)
 
 
 async def remove_peer(public_key: str):
@@ -80,7 +117,7 @@ async def remove_peer(public_key: str):
         f"{_agent_base()}/peers/{key_enc}",
         headers=_headers(),
     )
-    resp.raise_for_status()
+    _raise_for_peer_response(resp)
 
 
 async def allocate_ip(server_id: str) -> str:
