@@ -16,7 +16,7 @@ SSoT: `90-docs/adr/2605252200-vpn-etzhayyim-design.md`
 
 `vertex_vpn_*` に接続ログ系カラムを追加しない。
 `connected_at` / `source_ip` / `bytes_*` 系は schema・コード・ログの全レイヤーで禁止。
-詳細: CLAUDE.md (root) §VPN No-logs 不変条件 + ADR §5。
+詳細: AGENTS.md (root) §VPN No-logs 不変条件 + ADR §5。
 
 ## NSID
 
